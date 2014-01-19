@@ -1,31 +1,61 @@
-using System;
-using System.Text;
+﻿using System;
+using System.Collections;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
-using System.Collections;
+using System.Text;
 using System.Threading;
 
 namespace SourceRconLib
 {
     /// <summary>
-    /// Encapsulates RCON communication with a Source server.
+    /// 
     /// </summary>
-    public class Rcon : IDisposable
+    public class SourceRcon 
+        : IDisposable
     {
-        public event RconOutput ServerOutput;
-        public event RconOutput Errors;
-        public event BoolInfo ConnectionSuccess;
+        public event ServerResponseEventHandler ServerResponse;
+        public delegate void ServerResponseEventHandler(object sender, ServerResponseEventArgs e);
+        public event ErrorEventHandler Error;
+        public delegate void ErrorEventHandler(object sender, ErrorEventArgs e);
+        public event ConnectionStateChangedEventHandler ConnectionStateChanged;
+        public delegate void ConnectionStateChangedEventHandler(object sender, ConnectionStateEventArgs e);
+
+        public static string connectionClosedString = "Connection closed by remote host.";
+        public static string connectionSuccessString = "Connection Succeeded!";
+        public static string connectionFailedString = "Connection Failed!";
+        public static string notConnectedString = "Not connected.";
+        public static string unknownResponseTypeString = "Unknown response.";
+        public static string gotJunkPacketString = "Had junk packet. This is normal.";
+        
+        #if DEBUG
+        public ArrayList tempPackets;
+        #endif
+
+        bool alreadyClosed;
+        bool isConnected;
+        bool hadJunkPacket;
+
+        Socket socket;
+
+        int packetCount;
+        int requestIdCounter;
+
+        public bool Connected
+        {
+            get { return isConnected; }
+        }
 
         /// <summary>
         /// Constructor.
         /// </summary>
-        public Rcon()
+        public SourceRcon()
         {
-            rconSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             Reset();
 
             #if DEBUG
-                TempPackets = new ArrayList();
+            tempPackets = new ArrayList();
             #endif
         }
 
@@ -36,89 +66,120 @@ namespace SourceRconLib
         {
             if (!Disposed)
             {
-                rconSocket.Close();
+                socket.Close();
             }
 
             Disposed = true;
-            disconnected = true;
-            connected = false;
+            isConnected = false;
         }
 
         #endregion
 
-        bool disconnected;
-        public void Disconnect()
+        public static IPAddress GetIpAddressFromHostName(string hostname)
         {
-            if (connected)
-            {
-                connected = false;
-                disconnected = true;
-
-                rconSocket.Disconnect(false);
-            }
-            else
-            {
-                OnError(MessageCode.CantDisconnectIfNotConnected, null);
-            }
+            IPAddress[] ipAddresses = Dns.GetHostAddresses(hostname);
+            return ipAddresses[0];
         }
 
         /// <summary>
-        /// Attempts to connect to server.
+        /// Attempts to connect to a server.
         /// </summary>
-        /// <param name="Server">The IPEndpoint of the server to contact.</param>
-        /// <param name="password">RCON password.</param>
-        public void Connect(IPEndPoint Server, string password)
+        /// <param name="connection">The <see cref="RconConnection"/> object.</param>
+        public void Connect(RconConnection connection)
         {
-            if(Disposed)
-            {
-                OnError(MessageCode.ConnectionFailed, "Already disposed");
-                return;
-            }
+            if (connection.IP == null)
+                connection.IP = SourceRcon.GetIpAddressFromHostName(connection.Hostname);
 
-            if (disconnected)
+            Connect(new IPEndPoint(connection.IP, connection.Port), connection.Password);
+        }
+
+        /// <summary>
+        /// Attempts to connect to a server.
+        /// </summary>
+        /// <param name="server">The <see cref="IPEndPoint"/> of the server.</param>
+        /// <param name="password">The password.</param>
+        public void Connect(IPEndPoint server, string password)
+        {
+            if (Disposed)
             {
-                OnError(MessageCode.ConnectionFailed, "Previously disconnected");
+                OnError(new ErrorEventArgs(connectionFailedString + "Already disposed."));
                 return;
             }
 
             try
             {
-                rconSocket.Connect(Server);
+                socket.Connect(server);
             }
             catch (SocketException)
             {
-                OnError(MessageCode.ConnectionFailed, null);
-                OnConnectionSuccess(false);
+                OnError(new ErrorEventArgs(connectionFailedString));
+                OnConnectionStateChanged(new ConnectionStateEventArgs(ConnectionState.Failed));
                 return;
             }
 
             Reset();
 
-            RCONPacket ServerAuthPacket = new RCONPacket();
+            RconPacket serverAuthPacket = new RconPacket();
+            ++requestIdCounter;
+            serverAuthPacket.RequestId = 1;
+            serverAuthPacket.String1 = password;
+            serverAuthPacket.ServerDataSent = RconPacket.SERVERDATA_sent.SERVERDATA_AUTH;
 
-            ++RequestIDCounter;
-            ServerAuthPacket.RequestId = RequestIDCounter;
+            SendRconPacket(serverAuthPacket);
 
-            ServerAuthPacket.String1 = password;
-            ServerAuthPacket.ServerDataSent = RCONPacket.SERVERDATA_sent.SERVERDATA_AUTH;
-
-            SendRCONPacket(ServerAuthPacket);
-
-            //Start the listening loop, now that we've sent auth packet, we should be expecting a reply.
-            GetNewPacketFromServer();
+            // Start the listening loop, now that we've sent auth packet, we should be expecting a reply.
+            StartGetNewPacket();
         }
 
-        public bool ConnectBlocking(IPEndPoint Server, string password)
+        public bool ConnectBlocking(RconConnection connection)
+        {
+            if (connection.IP == null)
+                connection.IP = SourceRcon.GetIpAddressFromHostName(connection.Hostname);
+
+            return ConnectBlocking(new IPEndPoint(connection.IP, connection.Port), connection.Password);
+        }
+
+        public bool ConnectBlocking(IPEndPoint server, string password)
         {
             bool connected = false;
-            AutoResetEvent e = new AutoResetEvent(false);
+            AutoResetEvent resetEvent = new AutoResetEvent(false);
 
-            this.ConnectionSuccess += (IsConnected) => { connected = IsConnected; e.Set(); };
+            ConnectionStateChangedEventHandler stateChanged = (object sender, ConnectionStateEventArgs e) => {
+                connected = (e.ConnectionState == ConnectionState.Connected);
+                resetEvent.Set();
+            };
 
-            this.Connect(Server, password);
-            e.WaitOne();
+            ConnectionStateChanged += stateChanged;
+            Connect(server, password);
+            resetEvent.WaitOne();
+            ConnectionStateChanged -= stateChanged;
 
             return connected;
+        }
+
+        public void Disconnect()
+        {
+            if (isConnected)
+            {
+                OnConnectionStateChanged(new ConnectionStateEventArgs(ConnectionState.Closed));
+                isConnected = false;
+                socket.Disconnect(true);
+            }
+            else
+            {
+                OnError(new ErrorEventArgs(notConnectedString));
+            }
+        }
+
+        public void Close()
+        {
+            if (!alreadyClosed)
+            {
+                OnConnectionStateChanged(new ConnectionStateEventArgs(ConnectionState.Closed));
+                isConnected = false;
+                alreadyClosed = true;
+            }
+            socket.Close();
         }
 
         /// <summary>
@@ -128,109 +189,91 @@ namespace SourceRconLib
         /// <param name="command">Command to send.</param>
         public void ServerCommand(string command)
         {
-            if (connected)
+            if (isConnected)
             {
-                RCONPacket PacketToSend = new RCONPacket();
-                ++RequestIDCounter;
-                PacketToSend.RequestId = RequestIDCounter;
-                PacketToSend.ServerDataSent = RCONPacket.SERVERDATA_sent.SERVERDATA_EXECCOMMAND;
-                PacketToSend.String1 = command;
-                SendRCONPacket(PacketToSend);
+                RconPacket packetToSend = new RconPacket();
+                ++requestIdCounter;
+                packetToSend.RequestId = requestIdCounter;
+                packetToSend.ServerDataSent = RconPacket.SERVERDATA_sent.SERVERDATA_EXECCOMMAND;
+                packetToSend.String1 = command;
+                SendRconPacket(packetToSend);
             }
             else
             {
-                OnError(MessageCode.SendCommandsWhenConnected, null);
+                OnError(new ErrorEventArgs(notConnectedString));
             }
         }
 
         public string ServerCommandBlocking(string command)
         {
-            string s = null;
-            AutoResetEvent e = new AutoResetEvent(false);
+            string response = null;
+            AutoResetEvent resetEvent = new AutoResetEvent(false);
 
-            RconOutput output = (MessageCode code, string stringout) => { s = stringout; e.Set();  };
+            ServerResponseEventHandler serverResponse = (object sender, ServerResponseEventArgs e) => {
+                response = e.ServerResponse.Message;
+                resetEvent.Set();
+            };
 
-            this.ServerOutput += output;
-
+            ServerResponse += serverResponse;
             ServerCommand(command);
-            e.WaitOne();
+            resetEvent.WaitOne();
+            ServerResponse -= serverResponse;
 
-            ServerOutput -= output;
-            return s;
+            return response;
         }
-
-        // End of public interface.
-        // The guts start here.
-
-        Socket rconSocket;
-        int RequestIDCounter;
-        int PacketCount;
-
-        #if DEBUG
-            public ArrayList TempPackets;
-        #endif
 
         void Reset()
         {
-            PacketCount = 0;
-            RequestIDCounter = 0;
+            packetCount = 0;
+            requestIdCounter = 0;
         }
 
-        void SendRCONPacket(RCONPacket p)
+        void SendRconPacket(RconPacket p)
         {
-            byte[] Packet = p.OutputAsBytes();
+            byte[] packet = p.OutputAsBytes();
             try
             {
-                rconSocket.BeginSend(Packet, 0, Packet.Length, SocketFlags.None, new AsyncCallback(SendCallback), this);
+                socket.BeginSend(packet, 0, packet.Length, SocketFlags.None, new AsyncCallback(SendCallback), this);
             }
-            catch(SocketException se)
+            catch (SocketException se)
             {
-                OnError(MessageCode.ConnectionClosed, se.Message);
+                OnError(new ErrorEventArgs(connectionClosedString + se.Message));
                 Disconnect();
             }
-        }
-
-        bool connected;
-        public bool Connected
-        {
-            get { return connected; }
         }
 
         void SendCallback(IAsyncResult ar)
         {
             try
             {
-                rconSocket.EndSend(ar);
+                socket.EndSend(ar);
             }
             catch (SocketException se)
             {
-                OnError(MessageCode.ConnectionClosed, se.Message);
+                OnError(new ErrorEventArgs(connectionClosedString + se.Message));
                 Disconnect();
             }
         }
 
-        void GetNewPacketFromServer()
+        void StartGetNewPacket()
         {
-            // Prepare the state information for a new packet.
             PacketState state = new PacketState();
             state.IsPacketLength = true;
             state.Data = new byte[4];
-            state.PacketCount = PacketCount;
-            PacketCount++;
-
-            // If we're debugging, log the packetstate.
-            // Can use this to trace the packets later.
+            state.PacketCount = packetCount;
+            packetCount++;
+            
             #if DEBUG
-			    TempPackets.Add(state);
+            tempPackets.Add(state);
             #endif
 
             try
             {
-                rconSocket.BeginReceive(state.Data, 0, 4, SocketFlags.None, new AsyncCallback(ReceiveCallback), state);
+                socket.BeginReceive(state.Data, 0, 4, SocketFlags.None, new AsyncCallback(ReceiveCallback), state);
             }
             catch (SocketException se)
             {
-                OnError(MessageCode.ConnectionFailed, se.Message);
+                OnError(new ErrorEventArgs(connectionClosedString + se.Message));
                 Disconnect();
             }
         }
@@ -241,30 +284,30 @@ namespace SourceRconLib
 
             try
             {
-                int bytesreceived = rconSocket.EndReceive(ar);
+                int bytesRead = socket.EndReceive(ar);
                 state = (PacketState)ar.AsyncState;
-                state.BytesSoFar += bytesreceived;
+                state.BytesSoFar += bytesRead;
 
-#if DEBUG
-                Console.WriteLine("Receive Callback. Packet: {0} First packet: {1}, Bytes so far: {2}",
-                                    state.PacketCount, state.IsPacketLength, state.BytesSoFar);
-#endif
+                Debug.WriteLine(String.Format("Receive Callback. Packet: {0} First packet: {1}, Bytes so far: {2}",
+                    state.PacketCount, state.IsPacketLength, state.BytesSoFar));
 
-                // Spin the processing of this data off into another thread.
-                ThreadPool.QueueUserWorkItem((object pool_state) =>
+                ThreadPool.QueueUserWorkItem((object pool_state) => 
                 {
                     ProcessIncomingData(state);
                 });
-
+                
             }
-            catch (SocketException se)
+            catch (SocketException)
             {
-                OnError(MessageCode.ConnectionClosed, se.Message);
-                Disconnect();
+                OnError(new ErrorEventArgs(connectionClosedString));
+                OnConnectionStateChanged(new ConnectionStateEventArgs(ConnectionState.Disconnected));
+                Close();
             }
-            catch (ObjectDisposedException ode)
+            catch (ObjectDisposedException ex)
             {
-                OnError(MessageCode.AlreadyDisposed, ode.Message);
+                Debug.WriteLine("ObjectDisposedException catched: " + ex.Message);
+                OnConnectionStateChanged(new ConnectionStateEventArgs(ConnectionState.Disconnected));
+                Close();
             }
         }
 
@@ -285,8 +328,7 @@ namespace SourceRconLib
                 }
                 else
                 {
-                    OnError(MessageCode.EmptyPacket, null);
-                    // Treat as a fatal error?
+                    OnError(new ErrorEventArgs(connectionClosedString + "Empty packet."));
                     Disconnect();
                 }
             }
@@ -300,21 +342,20 @@ namespace SourceRconLib
                 }
                 else
                 {
-                    // This is the whole packet, so we can go ahead and pack it up into a structure and then punt it upstairs.
-                    #if DEBUG
-					    Console.WriteLine("Complete packet.");
-                    #endif
+                    // This is the whole packet, so we can go ahead and pack it up 
+                    // into a structure and then punt it upstairs.
+                    Debug.WriteLine("Complete packet.");
 
-                    RCONPacket ReturnedPacket = new RCONPacket();
-                    ReturnedPacket.ParseFromBytes(state.Data, this);
+                    RconPacket returnedPacket = new RconPacket();
+                    returnedPacket.ParseFromBytes(state.Data, this);
 
-                    ThreadPool.QueueUserWorkItem((object pool_state) =>
+                    ThreadPool.QueueUserWorkItem((object pool_state) => 
                     {
-                        ProcessResponse(ReturnedPacket);
+                        ProcessResponse(returnedPacket);
                     });
 
                     // Wait for new packet.
-                    GetNewPacketFromServer();
+                    StartGetNewPacket();
                 }
             }
         }
@@ -323,77 +364,68 @@ namespace SourceRconLib
         {
             try
             {
-                rconSocket.BeginReceive(state.Data, state.BytesSoFar, state.PacketLength - state.BytesSoFar, SocketFlags.None, new AsyncCallback(ReceiveCallback), state);
+                socket.BeginReceive(state.Data, state.BytesSoFar, state.PacketLength - state.BytesSoFar, SocketFlags.None, new AsyncCallback(ReceiveCallback), state);
             }
             catch (SocketException se)
             {
-                OnError(MessageCode.ConnectionClosed, se.Message);
+                OnError(new ErrorEventArgs(connectionClosedString + se.Message));
                 Disconnect();
             }
         }
 
-        void ProcessResponse(RCONPacket P)
+        void ProcessResponse(RconPacket P)
         {
             switch (P.ServerDataReceived)
             {
-                case RCONPacket.SERVERDATA_rec.SERVERDATA_AUTH_RESPONSE:
+                case RconPacket.SERVERDATA_rec.SERVERDATA_AUTH_RESPONSE:
                     if (P.RequestId != -1)
                     {
                         // Connected.
-                        connected = true;
-                        OnError(MessageCode.ConnectionSuccess, null);
-                        OnConnectionSuccess(true);
+                        isConnected = true;
+                        OnServerResponse(new ServerResponseEventArgs(new ServerResponse(connectionSuccessString)));
+                        OnConnectionStateChanged(new ConnectionStateEventArgs(ConnectionState.Success));
                     }
                     else
                     {
                         // Failed!
-                        OnError(MessageCode.ConnectionFailed, null);
-                        OnConnectionSuccess(false);
+                        OnError(new ErrorEventArgs(connectionFailedString));
+                        OnConnectionStateChanged(new ConnectionStateEventArgs(ConnectionState.Failed));
                     }
                     break;
-
-                case RCONPacket.SERVERDATA_rec.SERVERDATA_RESPONSE_VALUE:
-                    if (hadjunkpacket)
+                case RconPacket.SERVERDATA_rec.SERVERDATA_RESPONSE_VALUE:
+                    if (hadJunkPacket)
                     {
                         // Real packet!
-                        OnServerOutput(MessageCode.ConsoleOutput, P.String1);
+                        OnServerResponse(new ServerResponseEventArgs(new ServerResponse(P.String1)));
                     }
                     else
                     {
-                        hadjunkpacket = true;
-                        OnError(MessageCode.JunkPacket, null);
+                        hadJunkPacket = true;
+                        OnError(new ErrorEventArgs(gotJunkPacketString));
                     }
                     break;
                 default:
-                    OnError(MessageCode.UnknownResponse, null);
+                    OnError(new ErrorEventArgs(unknownResponseTypeString));
                     break;
             }
         }
 
-        bool hadjunkpacket;
-
-        internal void OnServerOutput(MessageCode code, string data)
+        protected virtual void OnServerResponse(ServerResponseEventArgs e)
         {
-            if (ServerOutput != null)
-            {
-                ServerOutput(code, data);
-            }
+            if (ServerResponse != null)
+                ServerResponse(this, e);
         }
 
-        internal void OnError(MessageCode code, string data)
+        protected virtual void OnError(ErrorEventArgs e)
         {
-            if (Errors != null)
-            {
-                Errors(code, data);
-            }
+            if (Error != null)
+                Error(this, e);
         }
 
-        internal void OnConnectionSuccess(bool info)
+        protected virtual void OnConnectionStateChanged(ConnectionStateEventArgs e)
         {
-            if (ConnectionSuccess != null)
-            {
-                ConnectionSuccess(info);
-            }
+            if (ConnectionStateChanged != null)
+                ConnectionStateChanged(this, e);
         }
     }
 }

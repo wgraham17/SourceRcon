@@ -1,10 +1,11 @@
 ﻿using System;
+using System.Collections;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 
 namespace SourceRconLib
 {
-    /// <summary>
-    /// Keeps track of a packet's state as it is reconstituted from the network.
-    /// </summary>
     internal class PacketState
     {
         internal PacketState()
