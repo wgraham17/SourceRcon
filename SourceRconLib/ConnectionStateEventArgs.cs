@@ -2,6 +2,8 @@
 
 namespace SourceRconLib
 {
+    public delegate void ConnectionStateChangedEventHandler(object sender, ConnectionStateEventArgs e);
+
     public class ConnectionStateEventArgs 
         : EventArgs
     {

@@ -57,6 +57,7 @@
   <ItemGroup>
     <Compile Include="ConnectionState.cs" />
     <Compile Include="ConnectionStateEventArgs.cs" />
+    <Compile Include="DisconnectionType.cs" />
     <Compile Include="ErrorEventArgs.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="RconConnection.cs" />
@@ -64,8 +65,7 @@
     <Compile Include="PacketState.cs" />
     <Compile Include="ServerResponse.cs" />
     <Compile Include="ServerResponseEventArgs.cs" />
-    <Compile Include="SocketExtensions.cs" />
-    <Compile Include="SourceRcon.cs" />
+    <Compile Include="SourceRconClient.cs" />
   </ItemGroup>
   <ItemGroup>
     <BootstrapperPackage Include="Microsoft.Net.Client.3.5">

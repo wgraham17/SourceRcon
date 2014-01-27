@@ -2,6 +2,8 @@
 
 namespace SourceRconLib
 {
+    public delegate void ErrorEventHandler(object sender, ErrorEventArgs e);
+
     public class ErrorEventArgs 
         : EventArgs
     {

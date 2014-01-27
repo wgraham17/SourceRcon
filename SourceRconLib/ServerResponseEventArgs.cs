@@ -2,6 +2,8 @@
 
 namespace SourceRconLib
 {
+    public delegate void ServerResponseEventHandler(object sender, ServerResponseEventArgs e);
+
     public class ServerResponseEventArgs 
         : EventArgs
     {

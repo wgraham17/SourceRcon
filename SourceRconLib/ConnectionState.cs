@@ -9,9 +9,13 @@ namespace SourceRconLib
         /// </summary>
         Success,
         /// <summary>
-        /// Authentication failed.
+        /// Connection failed, host unreachable.
         /// </summary>
         Failed,
+        /// <summary>
+        /// Authentication failed.
+        /// </summary>
+        InvalidLogin,
         /// <summary>
         /// Client is connected.
         /// </summary>
@@ -23,6 +27,10 @@ namespace SourceRconLib
         /// <summary>
         /// Connection was closed.
         /// </summary>
-        Closed
+        Closed,
+        /// <summary>
+        /// Something went terribly wrong.
+        /// </summary>
+        SocketException
     }
 }
