@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Collections;
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
 
 namespace SourceRconLib
@@ -16,7 +14,7 @@ namespace SourceRconLib
             None = 255
         }
 
-        public enum SERVERDATA_rec : int
+        public enum SERVERDATA_recv : int
         {
             SERVERDATA_RESPONSE_VALUE = 0,
             SERVERDATA_AUTH_RESPONSE = 2,
@@ -27,7 +25,7 @@ namespace SourceRconLib
         internal string String1;
         internal string String2;
         internal RconPacket.SERVERDATA_sent ServerDataSent;
-        internal RconPacket.SERVERDATA_rec ServerDataReceived;
+        internal RconPacket.SERVERDATA_recv ServerDataReceived;
 
         internal RconPacket()
         {
@@ -35,7 +33,7 @@ namespace SourceRconLib
             String1 = "blah";
             String2 = String.Empty;
             ServerDataSent = SERVERDATA_sent.None;
-            ServerDataReceived = SERVERDATA_rec.None;
+            ServerDataReceived = SERVERDATA_recv.None;
         }
 
         internal byte[] OutputAsBytes()
@@ -83,7 +81,7 @@ namespace SourceRconLib
             return FinalPacket;
         }
 
-        internal void ParseFromBytes(byte[] bytes, SourceRcon parent)
+        internal void ParseFromBytes(byte[] bytes)
         {
             int BPtr = 0;
             ArrayList stringcache;
@@ -93,7 +91,7 @@ namespace SourceRconLib
             RequestId = BitConverter.ToInt32(bytes, BPtr);
             BPtr += 4;
             // Next 4 are server data.
-            ServerDataReceived = (SERVERDATA_rec)BitConverter.ToInt32(bytes, BPtr);
+            ServerDataReceived = (SERVERDATA_recv)BitConverter.ToInt32(bytes, BPtr);
             BPtr += 4;
             // string1 till /0
             stringcache = new ArrayList();
